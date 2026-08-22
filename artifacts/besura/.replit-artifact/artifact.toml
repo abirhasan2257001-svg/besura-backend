@@ -1,0 +1,28 @@
+kind = "web"
+previewPath = "/"
+title = "Besura"
+description = "A static music discovery and listening experience for exploring curated releases, moods, artists, and a personal playback queue."
+version = "1.0.0"
+id = "artifacts/besura"
+router = "path"
+
+[[services]]
+name = "web"
+paths = [ "/" ]
+localPort = 19815
+
+[services.development]
+run = "pnpm --filter @workspace/besura run dev"
+
+[services.production]
+build = [ "pnpm", "--filter", "@workspace/besura", "run", "build" ]
+serve = "static"
+publicDir = "artifacts/besura/dist/public"
+
+[[services.production.rewrites]]
+from = "/*"
+to = "/index.html"
+
+[services.env]
+PORT = "19815"
+BASE_PATH = "/"
