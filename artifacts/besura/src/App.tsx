@@ -73,23 +73,32 @@ function formatDuration(seconds: number | string | undefined): string {
   return `${minutes}:${remainder}`;
 }
 
-function getImage(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (Array.isArray(value)) {
-    const image = value.find((item) => typeof item === 'string' || (item && typeof item === 'object' && 'url' in item));
-    if (typeof image === 'string') return image;
-    if (image && typeof image === 'object' && 'url' in image) return String(image.url);
-  }
-  return '';
+type MediaEntry = { url?: unknown; quality?: unknown; bitrate?: unknown };
+
+function mediaEntries(value: unknown): Array<string | MediaEntry> {
+  if (typeof value === 'string') return [value];
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string | MediaEntry =>
+    typeof item === 'string' || Boolean(item && typeof item === 'object' && 'url' in item),
+  );
 }
 
-function getFirstDownload(value: unknown): string | undefined {
-  if (typeof value === 'string') return value;
-  if (!Array.isArray(value)) return undefined;
-  const first = value.find((item) => typeof item === 'string' || (item && typeof item === 'object' && 'url' in item));
-  if (typeof first === 'string') return first;
-  if (first && typeof first === 'object' && 'url' in first) return String(first.url);
-  return undefined;
+function mediaUrl(entry: string | MediaEntry): string {
+  return typeof entry === 'string' ? entry : typeof entry.url === 'string' ? entry.url : '';
+}
+
+function mediaQuality(entry: string | MediaEntry): number {
+  if (typeof entry === 'string') return 0;
+  const quality = String(entry.quality ?? entry.bitrate ?? '');
+  const numericQuality = Number.parseInt(quality.replace(/[^\d]/g, ''), 10);
+  return Number.isFinite(numericQuality) ? numericQuality : 0;
+}
+
+function getBestMediaUrl(value: unknown): string {
+  return mediaEntries(value)
+    .map((entry) => ({ entry, url: mediaUrl(entry), quality: mediaQuality(entry) }))
+    .filter((item) => item.url)
+    .sort((left, right) => right.quality - left.quality)[0]?.url ?? '';
 }
 
 function normalizeSongs(payload: unknown): Track[] {
@@ -125,10 +134,36 @@ function normalizeSongs(payload: unknown): Track[] {
       album,
       duration: formatDuration(seconds || String(item.duration ?? '')),
       durationSeconds: seconds || undefined,
-      cover: getImage(item.image ?? item.cover ?? item.thumbnail),
-      streamUrl: getFirstDownload(item.downloadUrl ?? item.download_url),
+      cover: getBestMediaUrl(item.image ?? item.cover ?? item.thumbnail),
+      streamUrl: getBestMediaUrl(item.downloadUrl ?? item.download_url),
     };
   });
+}
+
+const SAAVN_SEARCH_ENDPOINTS = [
+  'https://saavn.dev/api/search/songs',
+  'https://saavn.me/search/songs',
+];
+
+async function searchJioSaavn(term: string): Promise<Track[]> {
+  let lastError: unknown;
+
+  for (const endpoint of SAAVN_SEARCH_ENDPOINTS) {
+    try {
+      const response = await fetch(`${endpoint}?query=${encodeURIComponent(term)}`, {
+        headers: { Accept: 'application/json' },
+      });
+      if (!response.ok) throw new Error(`Search request failed with ${response.status}`);
+      const payload: unknown = await response.json();
+      const songs = normalizeSongs(payload);
+      if (songs.length > 0) return songs;
+      lastError = new Error('The search response did not contain any songs');
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError ?? new Error('All search endpoints failed');
 }
 
 function hostIsAccepted(urlValue: string): boolean {
@@ -200,10 +235,7 @@ function App() {
     setSearchError('');
     setSearchedQuery(term);
     try {
-      const response = await fetch(`https://saavn.dev/api/search/songs?query=${encodeURIComponent(term)}`);
-      if (!response.ok) throw new Error('Search request failed');
-      const payload = await response.json();
-      setResults(normalizeSongs(payload));
+      setResults(await searchJioSaavn(term));
     } catch {
       setResults([]);
       setSearchError('We could not reach the music search. Check your connection and try again.');
