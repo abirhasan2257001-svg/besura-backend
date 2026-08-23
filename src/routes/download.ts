@@ -1,4 +1,6 @@
 import { Router } from "express";
+import { exec } from "child_process";
+
 const router = Router();
 
 router.post("/", async (req, res) => {
@@ -10,8 +12,7 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ error: "URL or videoId required" });
     }
 
-    const { exec } = require("child_process");
-    exec(`yt-dlp -g -f bestaudio "${targetUrl}"`, { timeout: 12000 }, (error, stdout, stderr) => {
+    exec(`yt-dlp -g -f bestaudio "${targetUrl}"`, { timeout: 12000 }, (error: any, stdout: any, stderr: any) => {
       if (error || !stdout) {
         console.error("yt-dlp error:", stderr || error);
         return res.status(502).json({ error: "Download link generation failed" });
