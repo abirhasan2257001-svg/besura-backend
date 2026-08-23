@@ -10,6 +10,8 @@ servers:
 tags:
   - name: health
     description: Health operations
+  - name: search
+    description: Music search operations
 paths:
   /healthz:
     get:
@@ -24,6 +26,32 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthStatus"
+  /search:
+    get:
+      operationId: searchSongs
+      tags: [search]
+      summary: Search songs
+      description: Searches public Piped API instances with automatic fallback.
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 1
+      responses:
+        "200":
+          description: Normalized song results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SongSearchResult"
+        "400":
+          description: Search term is missing
+        "502":
+          description: Upstream music providers are unavailable
 components:
   schemas:
     HealthStatus:
@@ -33,4 +61,32 @@ components:
           type: string
       required:
         - status
+    SongSearchResult:
+      type: object
+      properties:
+        id:
+          type: string
+        title:
+          type: string
+        artist:
+          type: string
+        album:
+          type: string
+        duration:
+          type: string
+        durationSeconds:
+          type: ["number", "null"]
+        cover:
+          type: string
+        streamUrl:
+          type: ["string", "null"]
+      required:
+        - id
+        - title
+        - artist
+        - album
+        - duration
+        - durationSeconds
+        - cover
+        - streamUrl
 

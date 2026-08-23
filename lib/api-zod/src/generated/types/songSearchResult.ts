@@ -5,9 +5,6 @@
  * API specification
  * OpenAPI spec version: 0.1.0
  */
-export interface HealthStatus {
-  status: string;
-}
 
 export interface SongSearchResult {
   id: string;
@@ -21,11 +18,3 @@ export interface SongSearchResult {
   /** @nullable */
   streamUrl: string | null;
 }
-
-export type SearchSongsParams = {
-/**
- * @minLength 1
- */
-q: string;
-};
-

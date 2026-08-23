@@ -105,6 +105,7 @@ function normalizeSongs(payload: unknown): Track[] {
   const response = payload as { data?: unknown; results?: unknown; songs?: unknown } | null;
   const data = response?.data;
   const possibleLists = [
+    Array.isArray(payload) ? payload : undefined,
     data,
     response?.results,
     response?.songs,
@@ -121,7 +122,7 @@ function normalizeSongs(payload: unknown): Track[] {
     const artist = Array.isArray(artistValue)
       ? artistValue.map((entry) => typeof entry === 'string' ? entry : String((entry as Record<string, unknown>).name ?? '')).filter(Boolean).join(', ')
       : String(artistValue);
-    const seconds = Number(item.duration);
+    const seconds = Number(item.durationSeconds ?? item.duration);
     const id = String(item.id ?? `${title}-${artist}-${index}`).replace(/\s+/g, '-').toLowerCase();
     const albumValue = item.album;
     const album = albumValue && typeof albumValue === 'object'
@@ -132,38 +133,25 @@ function normalizeSongs(payload: unknown): Track[] {
       title,
       artist: artist || 'Unknown artist',
       album,
-      duration: formatDuration(seconds || String(item.duration ?? '')),
+      duration: typeof item.duration === 'string' && item.duration.includes(':')
+        ? item.duration
+        : formatDuration(seconds || String(item.duration ?? '')),
       durationSeconds: seconds || undefined,
       cover: getBestMediaUrl(item.image ?? item.cover ?? item.thumbnail),
-      streamUrl: getBestMediaUrl(item.downloadUrl ?? item.download_url),
+      streamUrl: getBestMediaUrl(item.downloadUrl ?? item.download_url ?? item.streamUrl),
     };
   });
 }
 
-const SAAVN_SEARCH_ENDPOINTS = [
-  'https://saavn.dev/api/search/songs',
-  'https://saavn.me/search/songs',
-];
-
-async function searchJioSaavn(term: string): Promise<Track[]> {
-  let lastError: unknown;
-
-  for (const endpoint of SAAVN_SEARCH_ENDPOINTS) {
-    try {
-      const response = await fetch(`${endpoint}?query=${encodeURIComponent(term)}`, {
-        headers: { Accept: 'application/json' },
-      });
-      if (!response.ok) throw new Error(`Search request failed with ${response.status}`);
-      const payload: unknown = await response.json();
-      const songs = normalizeSongs(payload);
-      if (songs.length > 0) return songs;
-      lastError = new Error('The search response did not contain any songs');
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError ?? new Error('All search endpoints failed');
+async function searchSongsFromBackend(term: string): Promise<Track[]> {
+  const response = await fetch(`/api/search?q=${encodeURIComponent(term)}`, {
+    headers: { Accept: 'application/json' },
+  });
+  if (!response.ok) throw new Error(`Search request failed with ${response.status}`);
+  const payload: unknown = await response.json();
+  const songs = normalizeSongs(payload);
+  if (songs.length === 0) throw new Error('The search response did not contain any songs');
+  return songs;
 }
 
 function hostIsAccepted(urlValue: string): boolean {
@@ -235,7 +223,7 @@ function App() {
     setSearchError('');
     setSearchedQuery(term);
     try {
-      setResults(await searchJioSaavn(term));
+      setResults(await searchSongsFromBackend(term));
     } catch {
       setResults([]);
       setSearchError('We could not reach the music search. Check your connection and try again.');
