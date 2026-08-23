@@ -31,7 +31,7 @@ paths:
       operationId: searchSongs
       tags: [search]
       summary: Search songs
-      description: Searches YouTube videos through the YouTube Data API.
+      description: Searches YouTube videos through YouTube's public results page without an API key.
       parameters:
         - name: q
           in: query

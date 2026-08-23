@@ -1,19 +1,6 @@
 import { Router, type IRouter } from "express";
 import { SearchSongsQueryParams, SearchSongsResponse } from "@workspace/api-zod";
 
-type YoutubeSearchItem = {
-  id?: { videoId?: unknown };
-  snippet?: {
-    title?: unknown;
-    channelTitle?: unknown;
-    thumbnails?: {
-      high?: { url?: unknown };
-      medium?: { url?: unknown };
-      default?: { url?: unknown };
-    };
-  };
-};
-
 type SongResult = {
   id: string;
   title: string;
@@ -26,37 +13,117 @@ type SongResult = {
 };
 
 const router: IRouter = Router();
-const YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search";
+const YOUTUBE_SEARCH_URLS = [
+  "https://www.youtube.com/results",
+  "https://m.youtube.com/results",
+] as const;
 
-function youtubeSearchItems(payload: unknown): YoutubeSearchItem[] {
-  const items = (payload as { items?: unknown } | null)?.items;
-  return Array.isArray(items) ? (items as YoutubeSearchItem[]) : [];
+function textFromRuns(value: unknown): string {
+  const runs = (value as { runs?: unknown } | null)?.runs;
+  if (Array.isArray(runs)) {
+    return runs
+      .map((run) => String((run as { text?: unknown }).text ?? ""))
+      .join("");
+  }
+  return String((value as { simpleText?: unknown } | null)?.simpleText ?? "");
+}
+
+function extractInitialData(html: string): unknown {
+  const marker = "ytInitialData";
+  const markerIndex = html.indexOf(marker);
+  if (markerIndex < 0) return null;
+  const start = html.indexOf("{", markerIndex);
+  if (start < 0) return null;
+
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let index = start; index < html.length; index += 1) {
+    const character = html[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') {
+      inString = true;
+      continue;
+    }
+    if (character === "{") depth += 1;
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        try {
+          return JSON.parse(html.slice(start, index + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
+}
+
+function collectVideoRenderers(value: unknown, results: Record<string, unknown>[] = []): Record<string, unknown>[] {
+  if (!value || typeof value !== "object") return results;
+  if (Array.isArray(value)) {
+    for (const item of value) collectVideoRenderers(item, results);
+    return results;
+  }
+
+  const object = value as Record<string, unknown>;
+  if (object.videoRenderer && typeof object.videoRenderer === "object") {
+    results.push(object.videoRenderer as Record<string, unknown>);
+  }
+  for (const child of Object.values(object)) collectVideoRenderers(child, results);
+  return results;
 }
 
 function normalizeYoutubeSearch(payload: unknown): SongResult[] {
-  return youtubeSearchItems(payload)
+  return collectVideoRenderers(payload)
     .map((item) => {
-      const videoId = typeof item.id?.videoId === "string" ? item.id.videoId : "";
-      const snippet = item.snippet ?? {};
-      const thumbnails = snippet.thumbnails ?? {};
-      const cover =
-        (typeof thumbnails.high?.url === "string" && thumbnails.high.url) ||
-        (typeof thumbnails.medium?.url === "string" && thumbnails.medium.url) ||
-        (typeof thumbnails.default?.url === "string" && thumbnails.default.url) ||
-        "";
-
+      const videoId = typeof item.videoId === "string" ? item.videoId : "";
+      const thumbnails = (item.thumbnail as { thumbnails?: unknown } | undefined)?.thumbnails;
+      const thumbnailList = Array.isArray(thumbnails) ? thumbnails : [];
+      const cover = String(
+        (thumbnailList[thumbnailList.length - 1] as { url?: unknown } | undefined)?.url ?? "",
+      );
       return {
         id: videoId,
-        title: String(snippet.title ?? "Untitled video"),
-        artist: String(snippet.channelTitle ?? "Unknown channel"),
+        title: textFromRuns(item.title),
+        artist: textFromRuns(item.ownerText) || textFromRuns(item.longBylineText) || "Unknown channel",
         album: "YouTube",
-        duration: "--:--",
+        duration: textFromRuns(item.lengthText) || "--:--",
         durationSeconds: null,
         cover,
         streamUrl: `https://www.youtube.com/watch?v=${videoId}`,
       };
     })
-    .filter((song) => song.id);
+    .filter((song) => song.id && song.title);
+}
+
+async function fetchYoutubeSearch(query: string): Promise<SongResult[]> {
+  let lastError: unknown;
+  for (const url of YOUTUBE_SEARCH_URLS) {
+    try {
+      const params = new URLSearchParams({ search_query: query, hl: "en" });
+      const response = await fetch(`${url}?${params}`, {
+        headers: {
+          Accept: "text/html",
+          "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36",
+        },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (!response.ok) throw new Error(`YouTube search returned HTTP ${response.status}`);
+      const results = normalizeYoutubeSearch(extractInitialData(await response.text()));
+      if (results.length > 0) return results;
+      throw new Error("YouTube returned no parseable video results");
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error("YouTube search failed");
 }
 
 router.get("/search", async (req, res) => {
@@ -66,35 +133,10 @@ router.get("/search", async (req, res) => {
     return;
   }
 
-  const apiKey = process.env["YOUTUBE_API_KEY"];
-  if (!apiKey) {
-    req.log.error("YOUTUBE_API_KEY is not configured");
-    res.status(503).json({
-      error: "YouTube search is not configured on this server.",
-    });
-    return;
-  }
-
   const query = parsed.data.q.trim();
-  const params = new URLSearchParams({
-    part: "snippet",
-    type: "video",
-    maxResults: "25",
-    q: query,
-    key: apiKey,
-  });
 
   try {
-    const response = await fetch(`${YOUTUBE_SEARCH_URL}?${params}`, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(8_000),
-    });
-
-    if (!response.ok) {
-      throw new Error(`YouTube API returned HTTP ${response.status}`);
-    }
-
-    const songs = normalizeYoutubeSearch(await response.json());
+    const songs = await fetchYoutubeSearch(query);
     res.json(SearchSongsResponse.parse(songs));
   } catch (error) {
     req.log.error({ err: error, query }, "YouTube search failed");
