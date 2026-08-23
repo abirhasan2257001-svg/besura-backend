@@ -1,13 +1,17 @@
 import { Router, type IRouter } from "express";
 import { SearchSongsQueryParams, SearchSongsResponse } from "@workspace/api-zod";
 
-type PipedSearchItem = {
-  url?: unknown;
-  title?: unknown;
-  uploaderName?: unknown;
-  uploaderUrl?: unknown;
-  duration?: unknown;
-  thumbnail?: unknown;
+type YoutubeSearchItem = {
+  id?: { videoId?: unknown };
+  snippet?: {
+    title?: unknown;
+    channelTitle?: unknown;
+    thumbnails?: {
+      high?: { url?: unknown };
+      medium?: { url?: unknown };
+      default?: { url?: unknown };
+    };
+  };
 };
 
 type SongResult = {
@@ -18,95 +22,41 @@ type SongResult = {
   duration: string;
   durationSeconds: number | null;
   cover: string;
-  streamUrl: string | null;
+  streamUrl: string;
 };
 
 const router: IRouter = Router();
+const YOUTUBE_SEARCH_URL = "https://www.googleapis.com/youtube/v3/search";
 
-// Keep the list ordered by generally reliable instances. The fallback helper
-// below skips unavailable, rate-limited, and malformed instances automatically.
-export const PIPED_INSTANCES = [
-  "https://pipedapi.kavin.rocks",
-  "https://pipedapi.adminforge.de",
-  "https://pipedapi.reallyaweso.me",
-  "https://pipedapi.drgns.space",
-  "https://pipedapi-libre.kavin.rocks",
-  "https://api.piped.yt",
-] as const;
-
-const UPSTREAM_TIMEOUT_MS = 4_000;
-
-export async function fetchWithFallback<T>(
-  path: string,
-  parse: (payload: unknown) => T,
-): Promise<T> {
-  let lastError: unknown;
-
-  for (const instance of PIPED_INSTANCES) {
-    try {
-      const response = await fetch(`${instance}${path}`, {
-        headers: {
-          Accept: "application/json",
-          "User-Agent": "Besura/1.0",
-        },
-        signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
-      });
-
-      if (!response.ok) {
-        throw new Error(`${instance} returned HTTP ${response.status}`);
-      }
-
-      const payload: unknown = await response.json();
-      return parse(payload);
-    } catch (error) {
-      lastError = error;
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("All Piped API instances failed");
+function youtubeSearchItems(payload: unknown): YoutubeSearchItem[] {
+  const items = (payload as { items?: unknown } | null)?.items;
+  return Array.isArray(items) ? (items as YoutubeSearchItem[]) : [];
 }
 
-function durationLabel(seconds: unknown): string {
-  const total = Number(seconds);
-  if (!Number.isFinite(total) || total <= 0) return "--:--";
-  const minutes = Math.floor(total / 60);
-  const remainder = Math.floor(total % 60).toString().padStart(2, "0");
-  return `${minutes}:${remainder}`;
-}
-
-function videoIdFromUrl(value: unknown): string {
-  if (typeof value !== "string") return "";
-  const match = value.match(/\/watch\?v=([^&]+)/);
-  return match?.[1] ?? "";
-}
-
-function normalizePipedSearch(payload: unknown): SongResult[] {
-  if (!Array.isArray(payload)) return [];
-
-  return payload
-    .map((raw, index) => {
-      const item = (raw ?? {}) as PipedSearchItem;
-      const id = videoIdFromUrl(item.url);
-      const title = String(item.title ?? "Untitled track");
-      const artist = String(item.uploaderName ?? "Unknown artist");
-      const seconds = Number(item.duration);
+function normalizeYoutubeSearch(payload: unknown): SongResult[] {
+  return youtubeSearchItems(payload)
+    .map((item) => {
+      const videoId = typeof item.id?.videoId === "string" ? item.id.videoId : "";
+      const snippet = item.snippet ?? {};
+      const thumbnails = snippet.thumbnails ?? {};
+      const cover =
+        (typeof thumbnails.high?.url === "string" && thumbnails.high.url) ||
+        (typeof thumbnails.medium?.url === "string" && thumbnails.medium.url) ||
+        (typeof thumbnails.default?.url === "string" && thumbnails.default.url) ||
+        "";
 
       return {
-        id: id || `piped-${index}-${title}-${artist}`.replace(/\s+/g, "-").toLowerCase(),
-        title,
-        artist,
-        album: "Piped search",
-        duration: durationLabel(seconds),
-        durationSeconds: Number.isFinite(seconds) && seconds > 0 ? seconds : null,
-        cover: typeof item.thumbnail === "string" ? item.thumbnail : "",
-        // Piped search results do not contain playable URLs. The streams route
-        // is available to callers that need the selected video's formats.
-        streamUrl: null,
+        id: videoId,
+        title: String(snippet.title ?? "Untitled video"),
+        artist: String(snippet.channelTitle ?? "Unknown channel"),
+        album: "YouTube",
+        duration: "--:--",
+        durationSeconds: null,
+        cover,
+        streamUrl: `https://www.youtube.com/watch?v=${videoId}`,
       };
     })
-    .filter((song) => song.title !== "Untitled track" || song.id.startsWith("piped-"));
+    .filter((song) => song.id);
 }
 
 router.get("/search", async (req, res) => {
@@ -116,18 +66,40 @@ router.get("/search", async (req, res) => {
     return;
   }
 
+  const apiKey = process.env["YOUTUBE_API_KEY"];
+  if (!apiKey) {
+    req.log.error("YOUTUBE_API_KEY is not configured");
+    res.status(503).json({
+      error: "YouTube search is not configured on this server.",
+    });
+    return;
+  }
+
   const query = parsed.data.q.trim();
+  const params = new URLSearchParams({
+    part: "snippet",
+    type: "video",
+    maxResults: "25",
+    q: query,
+    key: apiKey,
+  });
 
   try {
-    const songs = await fetchWithFallback(
-      `/search?q=${encodeURIComponent(query)}`,
-      normalizePipedSearch,
-    );
+    const response = await fetch(`${YOUTUBE_SEARCH_URL}?${params}`, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(8_000),
+    });
+
+    if (!response.ok) {
+      throw new Error(`YouTube API returned HTTP ${response.status}`);
+    }
+
+    const songs = normalizeYoutubeSearch(await response.json());
     res.json(SearchSongsResponse.parse(songs));
   } catch (error) {
-    req.log.error({ err: error, query }, "All Piped search instances failed");
+    req.log.error({ err: error, query }, "YouTube search failed");
     res.status(502).json({
-      error: "Music search is temporarily unavailable. Please try again.",
+      error: "YouTube search is temporarily unavailable. Please try again.",
     });
   }
 });

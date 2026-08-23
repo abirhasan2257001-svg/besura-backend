@@ -31,7 +31,7 @@ paths:
       operationId: searchSongs
       tags: [search]
       summary: Search songs
-      description: Searches public Piped API instances with automatic fallback.
+      description: Searches YouTube videos through the YouTube Data API.
       parameters:
         - name: q
           in: query

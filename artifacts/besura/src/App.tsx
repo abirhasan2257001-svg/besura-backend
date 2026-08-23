@@ -45,6 +45,68 @@ const FAVORITES_KEY = 'besura-favorites-v2';
 const PLAYLISTS_KEY = 'besura-playlists-v2';
 const ACCEPTED_HOSTS = ['youtube.com', 'youtu.be', 'facebook.com', 'fb.watch', 'instagram.com', 'tiktok.com'];
 
+type YoutubePlayer = {
+  destroy: () => void;
+  getDuration: () => number;
+  getCurrentTime: () => number;
+  getPlayerState: () => number;
+  loadVideoById: (videoId: string) => void;
+  pauseVideo: () => void;
+  playVideo: () => void;
+  seekTo: (seconds: number, allowSeekAhead: boolean) => void;
+};
+
+type YoutubeNamespace = {
+  Player: new (
+    element: HTMLElement,
+    options: {
+      height: string;
+      width: string;
+      videoId?: string;
+      playerVars?: Record<string, number | string>;
+      events?: {
+        onReady?: () => void;
+        onStateChange?: (event: { data: number }) => void;
+        onError?: () => void;
+      };
+    },
+  ) => YoutubePlayer;
+  PlayerState: { ENDED: number; PLAYING: number; PAUSED: number; CUED: number };
+};
+
+declare global {
+  interface Window {
+    YT?: YoutubeNamespace;
+    onYouTubeIframeAPIReady?: () => void;
+  }
+}
+
+let youtubeApiPromise: Promise<void> | null = null;
+
+function loadYoutubeIframeApi(): Promise<void> {
+  if (window.YT?.Player) return Promise.resolve();
+  if (youtubeApiPromise) return youtubeApiPromise;
+
+  youtubeApiPromise = new Promise((resolve, reject) => {
+    let existingScript = document.querySelector<HTMLScriptElement>(
+      'script[src="https://www.youtube.com/iframe_api"]',
+    );
+    const previousCallback = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => {
+      previousCallback?.();
+      resolve();
+    };
+    existingScript ??= document.createElement('script');
+    if (!existingScript.src) {
+      existingScript.src = 'https://www.youtube.com/iframe_api';
+      existingScript.async = true;
+      existingScript.onerror = () => reject(new Error('Could not load YouTube player'));
+      document.head.appendChild(existingScript);
+    }
+  });
+  return youtubeApiPromise;
+}
+
 function readStorage<T>(key: string, fallback: T): T {
   try {
     const raw = window.localStorage.getItem(key);
@@ -102,20 +164,8 @@ function getBestMediaUrl(value: unknown): string {
 }
 
 function normalizeSongs(payload: unknown): Track[] {
-  const response = payload as { data?: unknown; results?: unknown; songs?: unknown } | null;
-  const data = response?.data;
-  const possibleLists = [
-    Array.isArray(payload) ? payload : undefined,
-    data,
-    response?.results,
-    response?.songs,
-    data && typeof data === 'object' && 'results' in data ? (data as { results?: unknown }).results : undefined,
-    data && typeof data === 'object' && 'songs' in data ? (data as { songs?: unknown }).songs : undefined,
-  ];
-  const list = possibleLists.find((candidate) => Array.isArray(candidate));
-  if (!Array.isArray(list)) return [];
-
-  return list.map((raw, index) => {
+  if (!Array.isArray(payload)) return [];
+  return payload.map((raw, index) => {
     const item = (raw ?? {}) as Record<string, unknown>;
     const title = String(item.name ?? item.title ?? 'Untitled track');
     const artistValue = item.primaryArtists ?? item.artist ?? item.artists ?? 'Unknown artist';
@@ -123,22 +173,18 @@ function normalizeSongs(payload: unknown): Track[] {
       ? artistValue.map((entry) => typeof entry === 'string' ? entry : String((entry as Record<string, unknown>).name ?? '')).filter(Boolean).join(', ')
       : String(artistValue);
     const seconds = Number(item.durationSeconds ?? item.duration);
-    const id = String(item.id ?? `${title}-${artist}-${index}`).replace(/\s+/g, '-').toLowerCase();
-    const albumValue = item.album;
-    const album = albumValue && typeof albumValue === 'object'
-      ? String((albumValue as Record<string, unknown>).name ?? 'Single')
-      : String(albumValue ?? 'Single');
+    const id = String(item.id ?? '').trim() || `youtube-${index}`;
     return {
       id,
       title,
       artist: artist || 'Unknown artist',
-      album,
+      album: String(item.album ?? 'YouTube'),
       duration: typeof item.duration === 'string' && item.duration.includes(':')
         ? item.duration
         : formatDuration(seconds || String(item.duration ?? '')),
       durationSeconds: seconds || undefined,
-      cover: getBestMediaUrl(item.image ?? item.cover ?? item.thumbnail),
-      streamUrl: getBestMediaUrl(item.downloadUrl ?? item.download_url ?? item.streamUrl),
+      cover: String(item.cover ?? item.thumbnail ?? ''),
+      streamUrl: String(item.streamUrl ?? `https://www.youtube.com/watch?v=${id}`),
     };
   });
 }
@@ -193,7 +239,9 @@ function App() {
   const [downloadError, setDownloadError] = useState('');
   const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>('mp3');
   const [isDownloading, setIsDownloading] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const youtubeMountRef = useRef<HTMLDivElement | null>(null);
+  const youtubePlayerRef = useRef<YoutubePlayer | null>(null);
+  const [youtubeReady, setYoutubeReady] = useState(false);
 
   useEffect(() => writeStorage(FAVORITES_KEY, favorites), [favorites]);
   useEffect(() => writeStorage(PLAYLISTS_KEY, playlists), [playlists]);
@@ -239,20 +287,25 @@ function App() {
   };
 
   const playTrack = (track: Track) => {
-    if (!track.streamUrl) {
-      notify('This track has no playable source from JioSaavn.');
+    if (!/^[A-Za-z0-9_-]{1,30}$/.test(track.id)) {
+      notify('This result has no playable YouTube video.');
       setCurrentTrack(track);
       setIsPlaying(false);
       return;
     }
     setQueue((current) => current.some((item) => item.id === track.id) ? current : [...current, track]);
     if (currentTrack?.id === track.id) {
-      const audio = audioRef.current;
-      if (audio?.paused) {
-        void audio.play().then(() => setIsPlaying(true)).catch(() => notify('Playback was blocked by the browser.'));
-      } else {
-        audio?.pause();
+      const player = youtubePlayerRef.current;
+      if (!player) {
+        notify('The YouTube player is still loading.');
+        return;
+      }
+      if (player.getPlayerState() === window.YT?.PlayerState.PLAYING) {
+        player.pauseVideo();
         setIsPlaying(false);
+      } else {
+        player.playVideo();
+        setIsPlaying(true);
       }
       return;
     }
@@ -274,48 +327,112 @@ function App() {
   };
 
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !currentTrack) return;
-    audio.pause();
-    setCurrentTime(0);
-    setAudioDuration(currentTrack.durationSeconds ?? 0);
-    audio.onended = nextTrack;
-    if (!currentTrack.streamUrl) {
-      audio.removeAttribute('src');
+    const mount = youtubeMountRef.current;
+    if (!mount) return;
+    let cancelled = false;
+
+    void loadYoutubeIframeApi()
+      .then(() => {
+        if (cancelled || !window.YT?.Player) return;
+        youtubePlayerRef.current = new window.YT.Player(mount, {
+          height: '1',
+          width: '1',
+          playerVars: {
+            autoplay: 0,
+            controls: 0,
+            disablekb: 1,
+            playsinline: 1,
+          },
+          events: {
+            onReady: () => setYoutubeReady(true),
+            onStateChange: (event) => {
+              if (event.data === window.YT?.PlayerState.PLAYING) setIsPlaying(true);
+              if (event.data === window.YT?.PlayerState.PAUSED) setIsPlaying(false);
+              if (event.data === window.YT?.PlayerState.ENDED) {
+                setIsPlaying(false);
+                nextTrack();
+              }
+            },
+            onError: () => {
+              setIsPlaying(false);
+              notify('YouTube could not play this video.');
+            },
+          },
+        });
+      })
+      .catch(() => notify('The YouTube player could not load.'));
+
+    return () => {
+      cancelled = true;
+      youtubePlayerRef.current?.destroy();
+      youtubePlayerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const player = youtubePlayerRef.current;
+    if (!player || !youtubeReady || !currentTrack) return;
+    if (!/^[A-Za-z0-9_-]{1,30}$/.test(currentTrack.id)) {
       setIsPlaying(false);
       return;
     }
-    audio.src = currentTrack.streamUrl;
-    audio.load();
-    void audio.play().then(() => setIsPlaying(true)).catch(() => setIsPlaying(false));
-  }, [currentTrack]);
+    setCurrentTime(0);
+    setAudioDuration(currentTrack.durationSeconds ?? 0);
+    player.loadVideoById(currentTrack.id);
+    setIsPlaying(true);
+  }, [currentTrack, youtubeReady]);
 
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-    const updateTime = () => setCurrentTime(audio.currentTime);
-    const updateDuration = () => setAudioDuration(audio.duration || currentTrack?.durationSeconds || 0);
-    audio.addEventListener('timeupdate', updateTime);
-    audio.addEventListener('loadedmetadata', updateDuration);
-    return () => {
-      audio.removeEventListener('timeupdate', updateTime);
-      audio.removeEventListener('loadedmetadata', updateDuration);
+    if (!youtubeReady || !currentTrack) return;
+    const updateTime = () => {
+      const player = youtubePlayerRef.current;
+      if (!player) return;
+      setCurrentTime(player.getCurrentTime() || 0);
+      setAudioDuration(player.getDuration() || currentTrack.durationSeconds || 0);
     };
-  }, [currentTrack]);
+    const interval = window.setInterval(updateTime, 500);
+    updateTime();
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [currentTrack, youtubeReady]);
 
-  const downloadTrack = (track: Track) => {
-    if (!track.streamUrl) {
-      notify('There is no download source available for this track.');
+  const seekTo = (percent: number) => {
+    const player = youtubePlayerRef.current;
+    if (!player || !progressDuration) return;
+    const seconds = progressDuration * Math.max(0, Math.min(1, percent));
+    player.seekTo(seconds, true);
+    setCurrentTime(seconds);
+  };
+
+  const requestCobaltDownload = async (url: string, format: DownloadFormat): Promise<string> => {
+    const body = format === 'mp3'
+      ? { url, downloadMode: 'audio', audioFormat: 'mp3' }
+      : { url, downloadMode: 'video', videoQuality: '720' };
+    const response = await fetch('https://api.cobalt.tools/', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!response.ok) throw new Error(`Cobalt returned ${response.status}`);
+    const payload = await response.json() as { url?: string; tunnel?: string; redirect?: string; data?: { url?: string; tunnel?: string } };
+    const returnedUrl = payload.url ?? payload.tunnel ?? payload.redirect ?? payload.data?.url ?? payload.data?.tunnel;
+    if (!returnedUrl) throw new Error('Cobalt did not return a file URL');
+    return returnedUrl;
+  };
+
+  const downloadTrack = async (track: Track) => {
+    if (!/^[A-Za-z0-9_-]{1,30}$/.test(track.id)) {
+      notify('There is no YouTube source available for this track.');
       return;
     }
-    const anchor = document.createElement('a');
-    anchor.href = track.streamUrl;
-    anchor.download = `${track.title} - ${track.artist}.mp3`;
-    anchor.target = '_blank';
-    anchor.rel = 'noreferrer';
-    document.body.appendChild(anchor);
-    anchor.click();
-    anchor.remove();
+    try {
+      const returnedUrl = await requestCobaltDownload(`https://www.youtube.com/watch?v=${track.id}`, 'mp3');
+      window.open(returnedUrl, '_blank', 'noopener,noreferrer');
+      notify('Your MP3 download is ready.');
+    } catch {
+      notify('The MP3 download could not be created right now.');
+    }
   };
 
   const createPlaylist = (event: FormEvent) => {
@@ -600,7 +717,11 @@ function App() {
         )}
       </main>
 
-      <audio ref={audioRef} preload="metadata" aria-hidden="true" />
+      <div
+        ref={youtubeMountRef}
+        aria-hidden="true"
+        style={{ position: 'fixed', width: 1, height: 1, left: -10000, top: -10000, opacity: 0, pointerEvents: 'none' }}
+      />
       {currentTrack && <Player
         track={currentTrack}
         playing={isPlaying}
@@ -610,6 +731,7 @@ function App() {
         onToggle={() => playTrack(currentTrack)}
         onPrevious={previousTrack}
         onNext={nextTrack}
+        onSeek={seekTo}
       />}
 
       <nav className="bottom-nav" aria-label="Primary navigation">
@@ -670,7 +792,7 @@ function StateCard({ title, message, error = false, actionLabel, onAction }: { t
   return <div className={`surface state-card ${error ? 'error' : ''}`} data-testid={error ? 'status-error' : 'status-empty'}>{error ? <AlertCircle size={22} /> : <Music2 size={22} />}<div><h3>{title}</h3><p>{message}</p>{actionLabel && onAction && <button className="primary-button" style={{ marginTop: 15 }} onClick={onAction} data-testid="button-state-action">{actionLabel}</button>}</div></div>;
 }
 
-function Player({ track, playing, currentTime, duration, progress, onToggle, onPrevious, onNext }: { track: Track; playing: boolean; currentTime: number; duration: number; progress: number; onToggle: () => void; onPrevious: () => void; onNext: () => void }) {
+function Player({ track, playing, currentTime, duration, progress, onToggle, onPrevious, onNext, onSeek }: { track: Track; playing: boolean; currentTime: number; duration: number; progress: number; onToggle: () => void; onPrevious: () => void; onNext: () => void; onSeek: (percent: number) => void }) {
   return <section className="player" aria-label="Audio player" data-testid="player">
     <div className="player-main">
       {track.cover ? <img className="player-art" src={track.cover} alt="" /> : <div className="player-art" />}
@@ -681,7 +803,7 @@ function Player({ track, playing, currentTime, duration, progress, onToggle, onP
         <button className="icon-button" onClick={onNext} data-testid="button-player-next" aria-label="Next track"><SkipForward size={15} fill="currentColor" /></button>
       </div>
     </div>
-    <div className="player-progress"><span>{formatClock(currentTime)}</span><div className="progress-track"><div className="progress-fill" style={{ width: `${progress}%` }} /></div><span>{formatClock(duration)}</span></div>
+    <div className="player-progress"><span>{formatClock(currentTime)}</span><div className="progress-track" onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); onSeek((event.clientX - bounds.left) / bounds.width); }} role="slider" aria-label="Seek track" aria-valuemin={0} aria-valuemax={duration || 0} aria-valuenow={currentTime} tabIndex={0}><div className="progress-fill" style={{ width: `${progress}%` }} /></div><span>{formatClock(duration)}</span></div>
     {!track.streamUrl && <p className="player-notice">This result has no playable source.</p>}
   </section>;
 }
