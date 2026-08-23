@@ -1,5 +1,8 @@
 {
   "version": 2,
+  "env": {
+    "PORT": "5010"
+  },
   "buildCommand": "pnpm run build",
   "builds": [
     {
