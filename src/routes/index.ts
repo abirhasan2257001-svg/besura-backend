@@ -1,12 +1,8 @@
-import { Router, type IRouter } from "express";
-import healthRouter from "./health";
-import searchRouter from "./search";
-import downloadRouter from "./download";
+import { Router } from "express";
+import downloadRouter from "./download.js";
 
-const router: IRouter = Router();
+const router = Router();
 
-router.use(healthRouter);
-router.use("/search", searchRouter);
-router.use("/download", downloadRouter);
+router.use("/", downloadRouter);
 
 export default router;
