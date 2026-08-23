@@ -38,6 +38,11 @@ app.use(
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
+// Root route so visiting the URL shows status
+app.get("/", (req, res) => {
+  res.json({ status: "Besura Backend is live and running successfully! 🚀" });
+});
+
 app.use("/api", router);
 
 export default app;
