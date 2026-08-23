@@ -1,7 +1,8 @@
-import { FormEvent, useEffect, useRef, useState } from 'react';
+import { FormEvent, MouseEvent, useEffect, useRef, useState } from 'react';
 import {
   AlertCircle,
   Check,
+  ChevronDown,
   Download,
   ExternalLink,
   Heart,
@@ -239,6 +240,7 @@ function App() {
   const [downloadError, setDownloadError] = useState('');
   const [downloadFormat, setDownloadFormat] = useState<DownloadFormat>('mp3');
   const [isDownloading, setIsDownloading] = useState(false);
+  const [isPlayerExpanded, setIsPlayerExpanded] = useState(false);
   const youtubeMountRef = useRef<HTMLDivElement | null>(null);
   const youtubePlayerRef = useRef<YoutubePlayer | null>(null);
   const [youtubeReady, setYoutubeReady] = useState(false);
@@ -406,17 +408,14 @@ function App() {
   };
 
   const requestCobaltDownload = async (url: string, format: DownloadFormat): Promise<string> => {
-    const body = format === 'mp3'
-      ? { url, downloadMode: 'audio', audioFormat: 'mp3' }
-      : { url, downloadMode: 'video', videoQuality: '720' };
-    const response = await fetch('https://api.cobalt.tools/', {
+    const response = await fetch('/api/download', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url, format }),
     });
-    if (!response.ok) throw new Error(`Cobalt returned ${response.status}`);
-    const payload = await response.json() as { url?: string; tunnel?: string; redirect?: string; data?: { url?: string; tunnel?: string } };
-    const returnedUrl = payload.url ?? payload.tunnel ?? payload.redirect ?? payload.data?.url ?? payload.data?.tunnel;
+    if (!response.ok) throw new Error(`Download request failed with ${response.status}`);
+    const payload = await response.json() as { url?: string };
+    const returnedUrl = payload.url;
     if (!returnedUrl) throw new Error('Cobalt did not return a file URL');
     return returnedUrl;
   };
@@ -428,7 +427,14 @@ function App() {
     }
     try {
       const returnedUrl = await requestCobaltDownload(`https://www.youtube.com/watch?v=${track.id}`, 'mp3');
-      window.open(returnedUrl, '_blank', 'noopener,noreferrer');
+      const anchor = document.createElement('a');
+      anchor.href = returnedUrl;
+      anchor.download = `${track.title} - ${track.artist}.mp3`;
+      anchor.target = '_blank';
+      anchor.rel = 'noreferrer';
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
       notify('Your MP3 download is ready.');
     } catch {
       notify('The MP3 download could not be created right now.');
@@ -487,18 +493,7 @@ function App() {
     }
     setIsDownloading(true);
     try {
-      const body = downloadFormat === 'mp3'
-        ? { url, downloadMode: 'audio', audioFormat: 'mp3' }
-        : { url, downloadMode: 'video', videoQuality: '720' };
-      const response = await fetch('https://api.cobalt.tools/', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-      });
-      if (!response.ok) throw new Error('Downloader request failed');
-      const payload = await response.json() as { url?: string; tunnel?: string; redirect?: string; data?: { url?: string; tunnel?: string } };
-      const returnedUrl = payload.url ?? payload.tunnel ?? payload.redirect ?? payload.data?.url ?? payload.data?.tunnel;
-      if (!returnedUrl) throw new Error('No file URL returned');
+      const returnedUrl = await requestCobaltDownload(url, downloadFormat);
       setDownloadUrl(returnedUrl);
     } catch {
       setDownloadError('The downloader could not create a file. The source may be private or temporarily unavailable.');
@@ -732,6 +727,9 @@ function App() {
         onPrevious={previousTrack}
         onNext={nextTrack}
         onSeek={seekTo}
+        expanded={isPlayerExpanded}
+        onExpand={() => setIsPlayerExpanded(true)}
+        onMinimize={() => setIsPlayerExpanded(false)}
       />}
 
       <nav className="bottom-nav" aria-label="Primary navigation">
@@ -792,20 +790,37 @@ function StateCard({ title, message, error = false, actionLabel, onAction }: { t
   return <div className={`surface state-card ${error ? 'error' : ''}`} data-testid={error ? 'status-error' : 'status-empty'}>{error ? <AlertCircle size={22} /> : <Music2 size={22} />}<div><h3>{title}</h3><p>{message}</p>{actionLabel && onAction && <button className="primary-button" style={{ marginTop: 15 }} onClick={onAction} data-testid="button-state-action">{actionLabel}</button>}</div></div>;
 }
 
-function Player({ track, playing, currentTime, duration, progress, onToggle, onPrevious, onNext, onSeek }: { track: Track; playing: boolean; currentTime: number; duration: number; progress: number; onToggle: () => void; onPrevious: () => void; onNext: () => void; onSeek: (percent: number) => void }) {
-  return <section className="player" aria-label="Audio player" data-testid="player">
+function Player({ track, playing, currentTime, duration, progress, onToggle, onPrevious, onNext, onSeek, expanded, onExpand, onMinimize }: { track: Track; playing: boolean; currentTime: number; duration: number; progress: number; onToggle: () => void; onPrevious: () => void; onNext: () => void; onSeek: (percent: number) => void; expanded: boolean; onExpand: () => void; onMinimize: () => void }) {
+  const seek = (event: MouseEvent<HTMLDivElement>) => {
+    const bounds = event.currentTarget.getBoundingClientRect();
+    onSeek((event.clientX - bounds.left) / bounds.width);
+  };
+  return <>
+    <section className="player" aria-label="Audio player" data-testid="player" onClick={onExpand} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') onExpand(); }}>
     <div className="player-main">
       {track.cover ? <img className="player-art" src={track.cover} alt="" /> : <div className="player-art" />}
       <div className="player-meta"><strong>{track.title}</strong><span>{track.artist}</span></div>
-      <div className="player-controls">
+      <div className="player-controls" onClick={(event) => event.stopPropagation()}>
         <button className="icon-button" onClick={onPrevious} data-testid="button-player-previous" aria-label="Previous track"><SkipBack size={15} fill="currentColor" /></button>
         <button className="icon-button play" onClick={onToggle} data-testid="button-player-toggle" aria-label={playing ? 'Pause track' : 'Play track'}>{playing ? <Pause size={15} fill="currentColor" /> : <Play size={15} fill="currentColor" />}</button>
         <button className="icon-button" onClick={onNext} data-testid="button-player-next" aria-label="Next track"><SkipForward size={15} fill="currentColor" /></button>
       </div>
     </div>
-    <div className="player-progress"><span>{formatClock(currentTime)}</span><div className="progress-track" onClick={(event) => { const bounds = event.currentTarget.getBoundingClientRect(); onSeek((event.clientX - bounds.left) / bounds.width); }} role="slider" aria-label="Seek track" aria-valuemin={0} aria-valuemax={duration || 0} aria-valuenow={currentTime} tabIndex={0}><div className="progress-fill" style={{ width: `${progress}%` }} /></div><span>{formatClock(duration)}</span></div>
+    <div className="player-progress" onClick={(event) => { event.stopPropagation(); seek(event); }}><span>{formatClock(currentTime)}</span><div className="progress-track" role="slider" aria-label="Seek track" aria-valuemin={0} aria-valuemax={duration || 0} aria-valuenow={currentTime} tabIndex={0}><div className="progress-fill" style={{ width: `${progress}%` }} /></div><span>{formatClock(duration)}</span></div>
     {!track.streamUrl && <p className="player-notice">This result has no playable source.</p>}
-  </section>;
+    </section>
+    {expanded && <section className="player-expanded" role="dialog" aria-modal="true" aria-label="Expanded audio player" data-testid="expanded-player">
+      <button className="player-collapse" onClick={onMinimize} aria-label="Minimize player" data-testid="button-minimize-player"><ChevronDown size={25} /></button>
+      {track.cover ? <img className="player-expanded-art" src={track.cover} alt="" /> : <div className="player-expanded-art" />}
+      <div className="player-expanded-meta"><strong>{track.title}</strong><span>{track.artist}</span></div>
+      <div className="player-progress player-expanded-progress" onClick={seek}><span>{formatClock(currentTime)}</span><div className="progress-track" role="slider" aria-label="Seek track" aria-valuemin={0} aria-valuemax={duration || 0} aria-valuenow={currentTime} tabIndex={0}><div className="progress-fill" style={{ width: `${progress}%` }} /></div><span>{formatClock(duration)}</span></div>
+      <div className="player-expanded-controls">
+        <button className="icon-button" onClick={onPrevious} data-testid="button-expanded-previous" aria-label="Previous track"><SkipBack size={22} fill="currentColor" /></button>
+        <button className="icon-button play" onClick={onToggle} data-testid="button-expanded-toggle" aria-label={playing ? 'Pause track' : 'Play track'}>{playing ? <Pause size={24} fill="currentColor" /> : <Play size={24} fill="currentColor" />}</button>
+        <button className="icon-button" onClick={onNext} data-testid="button-expanded-next" aria-label="Next track"><SkipForward size={22} fill="currentColor" /></button>
+      </div>
+    </section>}
+  </>;
 }
 
 export default App;

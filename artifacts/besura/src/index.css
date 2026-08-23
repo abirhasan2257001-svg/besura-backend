@@ -431,6 +431,7 @@
   background: rgba(30,30,30,.96);
   box-shadow: 0 15px 55px rgba(0,0,0,.44);
   backdrop-filter: blur(22px);
+  cursor: pointer;
 }
 .player-main { display: flex; align-items: center; gap: 10px; }
 .player-art { width: 40px; height: 40px; flex: 0 0 auto; border-radius: 8px; object-fit: cover; background: #292929; }
@@ -444,6 +445,48 @@
 .progress-track { position: relative; height: 3px; flex: 1; overflow: hidden; border-radius: 5px; background: #3d3d3d; }
 .progress-fill { height: 100%; border-radius: inherit; background: #1ed760; transition: width .15s linear; }
 .player-notice { margin: 6px 0 0; color: #dfa36f; font-size: 10px; }
+
+.player-expanded {
+  position: fixed;
+  z-index: 55;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 28px 22px max(28px, env(safe-area-inset-bottom));
+  color: #f2f2f2;
+  background: #121212;
+}
+.player-collapse {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  margin: 0 0 18px -8px;
+  place-items: center;
+  border: 0;
+  border-radius: 50%;
+  color: #cfcfcf;
+  background: transparent;
+}
+.player-collapse:hover { color: #fff; background: #292929; }
+.player-expanded-art {
+  width: min(78vw, 430px);
+  aspect-ratio: 1;
+  align-self: center;
+  margin: auto auto 30px;
+  border-radius: 18px;
+  object-fit: cover;
+  background: #292929;
+  box-shadow: 0 24px 70px rgba(0,0,0,.46);
+}
+.player-expanded-meta { margin: 0 auto 18px; width: min(100%, 520px); }
+.player-expanded-meta strong, .player-expanded-meta span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.player-expanded-meta strong { color: #f5f5f5; font-family: var(--app-font-display); font-size: 23px; }
+.player-expanded-meta span { margin-top: 7px; color: #969696; font-size: 14px; }
+.player-expanded-progress { width: min(100%, 520px); margin: 0 auto; }
+.player-expanded-progress .progress-track { height: 5px; cursor: pointer; }
+.player-expanded-controls { display: flex; align-items: center; justify-content: center; gap: 24px; margin: 25px auto auto; }
+.player-expanded-controls .icon-button { width: 48px; height: 48px; }
+.player-expanded-controls .icon-button.play { width: 64px; height: 64px; }
 
 .bottom-nav {
   position: fixed;
