@@ -64137,28 +64137,49 @@ app.get("/api/download", async (req, res) => {
     const match = url.match(/(?:v=|\/embed\/|\/v\/|https:\/\/youtu\.be\/|\/shorts\/)([^"&?\/\s]{11})/);
     if (!match) return res.status(400).json({ error: "Invalid YouTube URL" });
     const videoId = match[1];
-    const clients = ["TV", "TV_EMBEDDED", "IOS", "ANDROID", "WEB_EMBEDDED", "WEB"];
+    const clients = ["WEB", "ANDROID", "IOS", "TV_EMBEDDED"];
     const errors = [];
     for (const client of clients) {
       try {
         const yt = await Innertube.create({ client_type: client });
         const info2 = await yt.getInfo(videoId);
-        const fmts = (info2.streaming_data?.adaptive_formats || []).filter((f) => f.has_audio && !f.has_video);
-        if (fmts.length > 0) {
-          const best = fmts.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-          const audioUrl = best.url || (best.signature_cipher ? best.decipher(yt.session.player) : null);
-          if (audioUrl) {
-            return res.json({
-              success: true,
-              downloadUrl: audioUrl,
-              title: info2.basic_info?.title || title,
-              engine: client
-            });
-          }
-          errors.push(`${client}: formats ache kintu url nei`);
-        } else {
-          errors.push(`${client}: kono audio format pai ni`);
+        let fmts = [];
+        if (info2.streaming_data?.adaptive_formats?.length) {
+          fmts = info2.streaming_data.adaptive_formats;
+        } else if (info2.formats?.length) {
+          fmts = info2.formats;
+        } else if (info2.streaming_data?.formats?.length) {
+          fmts = info2.streaming_data.formats;
         }
+        if (fmts.length === 0) {
+          errors.push(`${client}: kono format pai ni (streaming_data: ${!!info2.streaming_data})`);
+          continue;
+        }
+        const audioFormats = fmts.filter((f) => {
+          const hasAudio = f.has_audio !== false && f.acodec && f.acodec !== "none";
+          const noVideo = !f.has_video || f.vcodec === "none";
+          return hasAudio && noVideo;
+        });
+        if (audioFormats.length === 0) {
+          errors.push(`${client}: ${fmts.length} formats ache, kintu kono audio nei (sample: ${JSON.stringify(fmts[0]).substring(0, 100)})`);
+          continue;
+        }
+        const best = audioFormats.sort((a, b) => (b.bitrate || b.audioBitrate || 0) - (a.bitrate || a.audioBitrate || 0))[0];
+        let audioUrl = best.url;
+        if (!audioUrl && best.signature_cipher) {
+          audioUrl = best.decipher(yt.session.player);
+        }
+        if (audioUrl) {
+          return res.json({
+            success: true,
+            downloadUrl: audioUrl,
+            title: info2.basic_info?.title || title,
+            engine: client,
+            bitrate: best.bitrate || best.audioBitrate || 0,
+            mimeType: best.mime_type || best.mimeType || "audio/webm"
+          });
+        }
+        errors.push(`${client}: audio format peyechi kintu url nei`);
       } catch (e) {
         errors.push(`${client}: ${e?.message || e}`);
       }
