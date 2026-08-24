@@ -12,6 +12,7 @@ router.post("/", async (req, res) => {
     }
 
     let data: any = null;
+    const errors: string[] = [];
     const clients = ["IOS", "ANDROID", "WEB"];
 
     for (const client of clients) {
@@ -23,27 +24,26 @@ router.post("/", async (req, res) => {
           const best = fmts.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
           const url = best.url || (best.signature_cipher ? best.decipher(yt.session.player) : null);
           if (url) {
-            data = {
-              url,
-              title: info.basic_info.title,
-              thumbnail: (info.basic_info.thumbnail || [])[0]?.url
-            };
+            data = { url, title: info.basic_info.title, thumbnail: (info.basic_info.thumbnail || [])[0]?.url };
             break;
+          } else {
+            errors.push(`${client}: formats found but no url`);
           }
+        } else {
+          errors.push(`${client}: no audio formats`);
         }
       } catch (e: any) {
-        console.error(`client ${client} failed:`, e?.message);
+        errors.push(`${client}: ${e?.message || e}`);
       }
     }
 
     if (!data) {
-      return res.status(502).json({ error: "Download link generation failed" });
+      return res.status(502).json({ error: "Download link generation failed", debug: errors });
     }
 
     return res.json(data);
   } catch (err: any) {
-    console.error("Download URL generation error:", err?.message || err);
-    return res.status(502).json({ error: "Download link generation failed" });
+    return res.status(502).json({ error: "Download link generation failed", debug: [err?.message || String(err)] });
   }
 });
 
