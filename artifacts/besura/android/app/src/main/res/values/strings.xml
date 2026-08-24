@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Besura</string>
+    <string name="title_activity_main">Besura</string>
+    <string name="package_name">com.besura.app</string>
+    <string name="custom_url_scheme">com.besura.app</string>
+</resources>

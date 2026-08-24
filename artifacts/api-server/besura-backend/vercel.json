@@ -1,0 +1,11 @@
+{
+  "version": 2,
+  "buildCommand": "pnpm --filter @workspace/api-server run build",
+  "outputDirectory": "artifacts/api-server/besura-backend/dist",
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/artifacts/api-server/besura-backend/dist/index.mjs"
+    }
+  ]
+}

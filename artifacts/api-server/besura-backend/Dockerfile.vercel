@@ -1,0 +1,26 @@
+FROM node:20-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ffmpeg python3 python3-pip \
+    && pip3 install --no-cache-dir --break-system-packages yt-dlp \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY package.json pnpm-lock.yaml ./
+COPY artifacts/api-server/besura-backend/package.json ./artifacts/api-server/besura-backend/package.json
+
+RUN corepack enable \
+    && pnpm install --frozen-lockfile
+
+COPY . .
+
+WORKDIR /app/artifacts/api-server/besura-backend
+
+RUN pnpm run build
+
+ENV NODE_ENV=production
+
+EXPOSE 8080
+
+CMD ["sh", "-c", "PORT=${PORT:-8080} node --enable-source-maps ./dist/index.mjs"]
