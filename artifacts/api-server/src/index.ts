@@ -20,14 +20,12 @@ app.get("/api/download", async (req, res) => {
     if (!match) return res.status(400).json({ error: "Invalid YouTube URL" });
 
     const videoId = match[1];
-
-    // Multiple consent/client patterns try করব
     const patterns = [
       `https://www.youtube.com/watch?v=${videoId}`,
       `https://m.youtube.com/watch?v=${videoId}`,
-      `https://www.youtube.com/embed/${videoId}`,
     ];
 
+    const debug: any[] = [];
     let playerResponse: any = null;
     let usedPattern = "";
 
@@ -43,91 +41,82 @@ app.get("/api/download", async (req, res) => {
         });
 
         const html = await response.text();
+        
+        debug.push({
+          pattern,
+          status: response.status,
+          htmlLength: html.length,
+          preview: html.substring(0, 300)
+        });
 
-        // Try multiple patterns to extract ytInitialPlayerResponse
-        const extractPatterns = [
+        // Extract ytInitialPlayerResponse
+        const regexes = [
           /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var\s+|<\/script>)/s,
           /ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var\s+|<\/script>)/s,
           /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
         ];
 
-        for (const regex of extractPatterns) {
+        for (const regex of regexes) {
           const m = html.match(regex);
           if (m && m[1]) {
             try {
               const parsed = JSON.parse(m[1]);
-              if (parsed?.streamingData?.adaptiveFormats?.length) {
+              if (parsed?.streamingData) {
                 playerResponse = parsed;
                 usedPattern = pattern;
                 break;
               }
-              if (parsed?.streamingData?.formats?.length) {
-                playerResponse = parsed;
-                usedPattern = pattern;
-                break;
-              }
-            } catch (e) {}
+            } catch (e: any) {
+              debug.push({ error: `JSON parse failed: ${e.message}` });
+            }
           }
         }
 
         if (playerResponse) break;
       } catch (e: any) {
-        console.error(`Pattern ${pattern} failed:`, e?.message);
+        debug.push({ pattern, error: e?.message || String(e) });
       }
     }
 
     if (!playerResponse) {
-      return res.status(500).json({ error: "Failed to fetch video data from any source" });
+      return res.status(500).json({ 
+        error: "Failed to fetch video data",
+        debug
+      });
     }
 
     const streamingData = playerResponse.streamingData;
-    if (!streamingData) {
-      return res.status(500).json({ error: "No streaming data found" });
-    }
-
-    // Combine adaptiveFormats + formats
     const allFormats = [
       ...(streamingData.adaptiveFormats || []),
       ...(streamingData.formats || []),
     ];
 
-    // Filter audio formats
     const audioFormats = allFormats.filter((f: any) => {
       const mime = f.mimeType || "";
-      const hasAudio = mime.startsWith("audio/") || (f.audioCodec && f.audioCodec !== "none");
-      const noVideo = !f.videoCodec || f.videoCodec === "none" || !mime.includes("video");
+      const hasAudio = mime.startsWith("audio/") || f.audioCodec;
+      const noVideo = !f.videoCodec || f.videoCodec === "none";
       return hasAudio && noVideo && f.url;
     });
 
     if (audioFormats.length === 0) {
       return res.status(500).json({ 
-        error: "No playable audio formats found",
-        debug: {
-          totalFormats: allFormats.length,
-          sampleMimes: allFormats.slice(0, 3).map((f: any) => f.mimeType)
-        }
+        error: "No playable audio formats",
+        totalFormats: allFormats.length,
+        sampleMimes: allFormats.slice(0, 5).map((f: any) => f.mimeType)
       });
     }
 
-    // Get best quality audio
     const best = audioFormats.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
 
     return res.json({
       success: true,
       downloadUrl: best.url,
       title: playerResponse.videoDetails?.title || title,
-      duration: parseInt(playerResponse.videoDetails?.lengthSeconds) || 0,
       engine: "direct-fetch",
-      pattern: usedPattern,
-      bitrate: best.bitrate || 0,
-      mimeType: best.mimeType || "audio/webm"
+      pattern: usedPattern
     });
   } catch (err: any) {
-    console.error("Download error:", err?.message || err);
-    return res.status(500).json({ 
-      error: "Failed to extract audio stream", 
-      details: err?.message || String(err)
-    });
+    return res.status(500).json({ error: "Failed", details: err?.message });
   }
 });
 
