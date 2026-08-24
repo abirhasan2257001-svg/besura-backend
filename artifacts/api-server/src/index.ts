@@ -1,123 +1,102 @@
 import express from "express";
 import cors from "cors";
-import { spawn } from "child_process";
-import fs from "fs";
-import path from "path";
+import { Innertube } from "youtubei.js";
 
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-const tmpDir = path.join(process.cwd(), "tmp");
-const termuxTmp = "/data/data/com.termux/files/usr/tmp";
+// Health check
+app.get("/api/healthz", (req, res) => {
+  res.json({ status: "ok" });
+});
 
-// Ensure temporary directories exist
-[tmpDir, termuxTmp].forEach((dir) => {
-  if (!fs.existsSync(dir)) {
-    try {
-      fs.mkdirSync(dir, { recursive: true });
-    } catch (e) {}
+// Download endpoint - GET request with query params
+app.get("/api/download", async (req, res) => {
+  try {
+    const url = req.query.url as string;
+    const title = (req.query.title as string) || "track";
+    
+    if (!url) {
+      return res.status(400).json({ error: "URL required" });
+    }
+
+    // Extract video ID from URL
+    const match = url.match(/(?:v=|\/embed\/|\/v\/|https:\/\/youtu\.be\/|\/shorts\/)([^"&?\/\s]{11})/);
+    if (!match) {
+      return res.status(400).json({ error: "Invalid YouTube URL" });
+    }
+    
+    const videoId = match[1];
+
+    // Try multiple YouTube clients
+    const clients = ["IOS", "ANDROID", "WEB"];
+    
+    for (const client of clients) {
+      try {
+        const yt = await Innertube.create({ client_type: client as any });
+        const info = await yt.getInfo(videoId);
+        const fmts = (info.streaming_data?.adaptive_formats || []).filter((f: any) => f.has_audio && !f.has_video);
+        
+        if (fmts.length > 0) {
+          const best = fmts.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+          const audioUrl = best.url || (best.signature_cipher ? best.decipher(yt.session.player) : null);
+          
+          if (audioUrl) {
+            return res.json({
+              success: true,
+              downloadUrl: audioUrl,
+              title: info.basic_info.title || title,
+              engine: `youtubei-${client.toLowerCase()}`
+            });
+          }
+        }
+      } catch (e: any) {
+        console.error(`Client ${client} failed:`, e?.message);
+      }
+    }
+
+    return res.status(500).json({ 
+      error: "Failed to extract audio stream from all clients"
+    });
+
+  } catch (err: any) {
+    console.error("Download error:", err?.message || err);
+    return res.status(500).json({ 
+      error: "Failed to extract audio stream",
+      details: err?.message || String(err)
+    });
   }
 });
 
-process.env.TMPDIR = termuxTmp;
-process.env.TEMP = termuxTmp;
-process.env.TMP = termuxTmp;
-
-app.get("/api/download", async (req, res) => {
-  const url = req.query.url as string;
-  const title = (req.query.title as string) || "track";
-  if (!url) return res.status(400).json({ error: "URL required" });
-
-  const sanitizedTitle = title.replace(/[^a-zA-Z0-9_-]/g, "_");
-  const tempFilePath = path.join(tmpDir, `${sanitizedTitle}.mp3`);
-
-  let ytDlpError = "";
+// Search endpoint (existing functionality preserved)
+app.get("/api/search", async (req, res) => {
   try {
-    await new Promise((resolve, reject) => {
-      const ytdlpExecutable = "/data/data/com.termux/files/usr/bin/yt-dlp";
-      const customEnv = {
-        ...process.env,
-        PATH: `${process.env.PATH || ""}:/data/data/com.termux/files/usr/bin`,
-        TMPDIR: termuxTmp,
-        TEMP: termuxTmp,
-        TMP: termuxTmp,
-        HOME: termuxTmp,
-        XDG_CACHE_HOME: termuxTmp,
-        XDG_CONFIG_HOME: termuxTmp
-      };
-
-      const ytdlp = spawn(
-        ytdlpExecutable,
-        [
-          "-x",
-          "--audio-format", "mp3",
-          "--audio-quality", "0",
-          "--no-cache-dir",
-          "--compat-options", "no-tmp-files",
-          "-P", tmpDir,
-          "-o", `${sanitizedTitle}.%(ext)s`,
-          url
-        ],
-        { env: customEnv }
-      );
-
-      let stderr = "";
-      ytdlp.stderr.on("data", (d) => {
-        stderr += d.toString();
-      });
-
-      ytdlp.on("close", (code) => {
-        if (code === 0 && fs.existsSync(tempFilePath)) {
-          resolve(null);
-        } else {
-          reject(new Error(stderr || `yt-dlp exited with code ${code}`));
-        }
-      });
-
-      ytdlp.on("error", (err) => reject(err));
-    });
-
-    if (fs.existsSync(tempFilePath)) {
-      res.setHeader("Content-Type", "audio/mpeg");
-      res.setHeader("Content-Disposition", `attachment; filename="${sanitizedTitle}.mp3"`);
-      const stream = fs.createReadStream(tempFilePath);
-      stream.pipe(res);
-      stream.on("end", () => {
-        if (fs.existsSync(tempFilePath)) {
-          try { fs.unlinkSync(tempFilePath); } catch (e) {}
-        }
-      });
-      return;
+    const query = req.query.q as string;
+    if (!query) {
+      return res.status(400).json({ error: "Query required" });
     }
-  } catch (e: any) {
-    ytDlpError = e.message || String(e);
-    console.error("Local yt-dlp failed:", ytDlpError);
+
+    const yt = await Innertube.create();
+    const results = await yt.search(query, { type: "video" });
+    
+    const videos = results.contents
+      ?.filter((item: any) => item.type === "Video")
+      ?.slice(0, 20)
+      ?.map((item: any) => ({
+        id: item.id,
+        title: item.title?.text,
+        author: item.author?.name,
+        duration: item.duration?.text,
+        thumbnail: item.thumbnails?.[0]?.url,
+        url: `https://www.youtube.com/watch?v=${item.id}`
+      })) || [];
+
+    res.json({ results: videos });
+  } catch (err: any) {
+    console.error("Search error:", err?.message || err);
+    res.status(500).json({ error: "Search failed" });
   }
-
-  // Fallback: Piped API
-  try {
-    const match = url.match(/(?:v=|\/embed\/|\/v\/|https:\/\/youtu\.be\/|\/shorts\/)([^"&?\/\s]{11})/);
-    if (match) {
-      const r = await fetch("https://pipedapi.kavin.rocks/streams/" + match[1]);
-      if (r.ok) {
-        const data = await r.json();
-        if (data?.audioStreams?.[0]?.url) {
-          return res.json({
-            success: true,
-            downloadUrl: data.audioStreams[0].url,
-            title,
-            engine: "piped"
-          });
-        }
-      }
-    }
-  } catch (err) {}
-
-  return res.status(500).json({
-    error: "Failed to extract audio stream.",
-    ytDlpError: ytDlpError
-  });
 });
 
 const PORT = process.env.PORT || 3001;
