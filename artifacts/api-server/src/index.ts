@@ -9,6 +9,40 @@ app.get("/api/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// Innertube API direct call
+async function fetchFromInnertube(videoId: string, clientName: string, clientVersion: string) {
+  const url = "https://www.youtube.com/youtubei/v1/player?key=AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w&prettyPrint=false";
+  
+  const payload = {
+    videoId,
+    context: {
+      client: {
+        clientName,
+        clientVersion,
+        hl: "en",
+        gl: "US",
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+      }
+    }
+  };
+
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+      "Accept": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Innertube failed: ${response.status}`);
+  }
+
+  return await response.json();
+}
+
 app.get("/api/download", async (req, res) => {
   try {
     const url = req.query.url as string;
@@ -20,100 +54,100 @@ app.get("/api/download", async (req, res) => {
     if (!match) return res.status(400).json({ error: "Invalid YouTube URL" });
 
     const videoId = match[1];
-    const patterns = [
-      `https://www.youtube.com/watch?v=${videoId}`,
-      `https://m.youtube.com/watch?v=${videoId}`,
+
+    // Multiple clients try করবো
+    const clients = [
+      { name: "WEB", version: "2.20241126.00.00" },
+      { name: "ANDROID", version: "19.44.38" },
+      { name: "IOS", version: "19.45.4" },
+      { name: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", version: "2.0" },
     ];
 
-    const debug: any[] = [];
-    let playerResponse: any = null;
-    let usedPattern = "";
+    const errors: string[] = [];
 
-    for (const pattern of patterns) {
+    for (const client of clients) {
       try {
-        const response = await fetch(pattern, {
-          headers: {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          },
-          redirect: "follow",
-        });
+        const data = await fetchFromInnertube(videoId, client.name, client.version);
 
-        const html = await response.text();
-        
-        debug.push({
-          pattern,
-          status: response.status,
-          htmlLength: html.length,
-          preview: html.substring(0, 300)
-        });
-
-        // Extract ytInitialPlayerResponse
-        const regexes = [
-          /var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var\s+|<\/script>)/s,
-          /ytInitialPlayerResponse\s*=\s*(\{.+?\});\s*(?:var\s+|<\/script>)/s,
-          /ytInitialPlayerResponse\s*=\s*(\{.+?\})\s*;/s,
-        ];
-
-        for (const regex of regexes) {
-          const m = html.match(regex);
-          if (m && m[1]) {
-            try {
-              const parsed = JSON.parse(m[1]);
-              if (parsed?.streamingData) {
-                playerResponse = parsed;
-                usedPattern = pattern;
-                break;
-              }
-            } catch (e: any) {
-              debug.push({ error: `JSON parse failed: ${e.message}` });
-            }
-          }
+        // Check playability
+        if (data.playabilityStatus?.status !== "OK") {
+          errors.push(`${client.name}: ${data.playabilityStatus?.status || "unknown"}`);
+          continue;
         }
 
-        if (playerResponse) break;
+        const streamingData = data.streamingData;
+        if (!streamingData) {
+          errors.push(`${client.name}: no streamingData`);
+          continue;
+        }
+
+        // Combine formats
+        const allFormats = [
+          ...(streamingData.adaptiveFormats || []),
+          ...(streamingData.formats || []),
+        ];
+
+        if (allFormats.length === 0) {
+          errors.push(`${client.name}: no formats`);
+          continue;
+        }
+
+        // Filter audio formats
+        const audioFormats = allFormats.filter((f: any) => {
+          const mime = f.mimeType || "";
+          return mime.startsWith("audio/");
+        });
+
+        if (audioFormats.length === 0) {
+          errors.push(`${client.name}: ${allFormats.length} formats, 0 audio`);
+          continue;
+        }
+
+        // Get best quality
+        const best = audioFormats.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
+
+        // Handle signature cipher
+        let audioUrl = best.url;
+        if (!audioUrl && best.signatureCipher) {
+          const params = new URLSearchParams(best.signatureCipher);
+          audioUrl = params.get("url");
+          // Note: signature deciphering complex, skip for now
+          if (audioUrl) {
+            return res.json({
+              success: true,
+              downloadUrl: audioUrl,
+              title: data.videoDetails?.title || title,
+              engine: `innertube-${client.name}`,
+              bitrate: best.bitrate || 0,
+              mimeType: best.mimeType || "audio/webm",
+              note: "signature may need deciphering"
+            });
+          }
+          errors.push(`${client.name}: signature cipher, no direct url`);
+          continue;
+        }
+
+        if (audioUrl) {
+          return res.json({
+            success: true,
+            downloadUrl: audioUrl,
+            title: data.videoDetails?.title || title,
+            duration: parseInt(data.videoDetails?.lengthSeconds) || 0,
+            engine: `innertube-${client.name}`,
+            bitrate: best.bitrate || 0,
+            mimeType: best.mimeType || "audio/webm"
+          });
+        }
+
+        errors.push(`${client.name}: audio found but no url`);
       } catch (e: any) {
-        debug.push({ pattern, error: e?.message || String(e) });
+        errors.push(`${client.name}: ${e?.message || String(e)}`);
       }
     }
 
-    if (!playerResponse) {
-      return res.status(500).json({ 
-        error: "Failed to fetch video data",
-        debug
-      });
-    }
-
-    const streamingData = playerResponse.streamingData;
-    const allFormats = [
-      ...(streamingData.adaptiveFormats || []),
-      ...(streamingData.formats || []),
-    ];
-
-    const audioFormats = allFormats.filter((f: any) => {
-      const mime = f.mimeType || "";
-      const hasAudio = mime.startsWith("audio/") || f.audioCodec;
-      const noVideo = !f.videoCodec || f.videoCodec === "none";
-      return hasAudio && noVideo && f.url;
-    });
-
-    if (audioFormats.length === 0) {
-      return res.status(500).json({ 
-        error: "No playable audio formats",
-        totalFormats: allFormats.length,
-        sampleMimes: allFormats.slice(0, 5).map((f: any) => f.mimeType)
-      });
-    }
-
-    const best = audioFormats.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
-
-    return res.json({
-      success: true,
-      downloadUrl: best.url,
-      title: playerResponse.videoDetails?.title || title,
-      engine: "direct-fetch",
-      pattern: usedPattern
+    return res.status(500).json({ 
+      error: "All Innertube clients failed",
+      debug: errors
     });
   } catch (err: any) {
     return res.status(500).json({ error: "Failed", details: err?.message });
