@@ -7,11 +7,11 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 // Health check
-app.get("/api/healthz", (req, res) => {
+app.get("/api/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
 
-// Download endpoint - GET request with query params
+// Download endpoint
 app.get("/api/download", async (req, res) => {
   try {
     const url = req.query.url as string;
@@ -28,8 +28,6 @@ app.get("/api/download", async (req, res) => {
     }
     
     const videoId = match[1];
-
-    // Try multiple YouTube clients
     const clients = ["IOS", "ANDROID", "WEB"];
     
     for (const client of clients) {
@@ -66,36 +64,6 @@ app.get("/api/download", async (req, res) => {
       error: "Failed to extract audio stream",
       details: err?.message || String(err)
     });
-  }
-});
-
-// Search endpoint (existing functionality preserved)
-app.get("/api/search", async (req, res) => {
-  try {
-    const query = req.query.q as string;
-    if (!query) {
-      return res.status(400).json({ error: "Query required" });
-    }
-
-    const yt = await Innertube.create();
-    const results = await yt.search(query, { type: "video" });
-    
-    const videos = results.contents
-      ?.filter((item: any) => item.type === "Video")
-      ?.slice(0, 20)
-      ?.map((item: any) => ({
-        id: item.id,
-        title: item.title?.text,
-        author: item.author?.name,
-        duration: item.duration?.text,
-        thumbnail: item.thumbnails?.[0]?.url,
-        url: `https://www.youtube.com/watch?v=${item.id}`
-      })) || [];
-
-    res.json({ results: videos });
-  } catch (err: any) {
-    console.error("Search error:", err?.message || err);
-    res.status(500).json({ error: "Search failed" });
   }
 });
 

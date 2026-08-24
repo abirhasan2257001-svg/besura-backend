@@ -17,9 +17,9 @@ var __commonJS = (cb, mod) => function __require2() {
   return mod || (0, cb[__getOwnPropNames(cb)[0]])((mod = { exports: {} }).exports, mod), mod.exports;
 };
 
-// ../../node_modules/real-require/src/index.js
+// ../../node_modules/.pnpm/real-require@0.2.0/node_modules/real-require/src/index.js
 var require_src = __commonJS({
-  "../../node_modules/real-require/src/index.js"(exports, module) {
+  "../../node_modules/.pnpm/real-require@0.2.0/node_modules/real-require/src/index.js"(exports, module) {
     var realImport2 = new Function("modulePath", "return import(modulePath)");
     function realRequire2(modulePath) {
       if (typeof __non_webpack__require__ === "function") {
@@ -119,7 +119,7 @@ async function start() {
   let worker;
   try {
     if (filename.endsWith(".ts") || filename.endsWith(".cts")) {
-      if (!process[/* @__PURE__ */ Symbol.for("ts-node.register.instance")]) {
+      if (!process[Symbol.for("ts-node.register.instance")]) {
         realRequire("ts-node/register");
       } else if (process.env.TS_NODE_DEV) {
         realRequire("ts-node-dev");
