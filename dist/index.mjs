@@ -64133,15 +64133,12 @@ app.get("/api/download", async (req, res) => {
   try {
     const url = req.query.url;
     const title = req.query.title || "track";
-    if (!url) {
-      return res.status(400).json({ error: "URL required" });
-    }
+    if (!url) return res.status(400).json({ error: "URL required" });
     const match = url.match(/(?:v=|\/embed\/|\/v\/|https:\/\/youtu\.be\/|\/shorts\/)([^"&?\/\s]{11})/);
-    if (!match) {
-      return res.status(400).json({ error: "Invalid YouTube URL" });
-    }
+    if (!match) return res.status(400).json({ error: "Invalid YouTube URL" });
     const videoId = match[1];
-    const clients = ["IOS", "ANDROID", "WEB"];
+    const clients = ["TV", "TV_EMBEDDED", "IOS", "ANDROID", "WEB_EMBEDDED", "WEB"];
+    const errors = [];
     for (const client of clients) {
       try {
         const yt = await Innertube.create({ client_type: client });
@@ -64154,24 +64151,21 @@ app.get("/api/download", async (req, res) => {
             return res.json({
               success: true,
               downloadUrl: audioUrl,
-              title: info2.basic_info.title || title,
-              engine: `youtubei-${client.toLowerCase()}`
+              title: info2.basic_info?.title || title,
+              engine: client
             });
           }
+          errors.push(`${client}: formats ache kintu url nei`);
+        } else {
+          errors.push(`${client}: kono audio format pai ni`);
         }
       } catch (e) {
-        console.error(`Client ${client} failed:`, e?.message);
+        errors.push(`${client}: ${e?.message || e}`);
       }
     }
-    return res.status(500).json({
-      error: "Failed to extract audio stream from all clients"
-    });
+    return res.status(500).json({ error: "Failed to extract audio stream", debug: errors });
   } catch (err2) {
-    console.error("Download error:", err2?.message || err2);
-    return res.status(500).json({
-      error: "Failed to extract audio stream",
-      details: err2?.message || String(err2)
-    });
+    return res.status(500).json({ error: "Failed", debug: [err2?.message || String(err2)] });
   }
 });
 var PORT = process.env.PORT || 3001;
