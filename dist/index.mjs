@@ -24035,105 +24035,107 @@ var import_cors = __toESM(require_lib3(), 1);
 var app = (0, import_express.default)();
 app.use((0, import_cors.default)({ origin: "*" }));
 app.use(import_express.default.json());
+var UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 app.get("/api/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
-var SAAVN_APIS = [
-  "https://saavn.dev/api/search/songs",
-  "https://saavn-api.vercel.app/api/search/songs",
-  "https://jiosaavn-api-privatecvc2.vercel.app/search/songs"
-];
-function normalizeSaavnSong(song) {
-  const imageArray = Array.isArray(song.image) ? song.image : [];
-  const downloadArray = Array.isArray(song.downloadUrl) ? song.downloadUrl : [];
-  return {
-    id: song.id,
-    title: song.name || song.title || "Unknown",
-    artist: song.primaryArtists || song.singers || "Unknown Artist",
-    album: typeof song.album === "object" ? song.album?.name || "Unknown" : song.album || "Unknown",
-    duration: song.duration || song.more_info?.duration || "0:00",
-    cover: imageArray[imageArray.length - 1]?.url || (typeof song.image === "string" ? song.image : ""),
-    streamUrl: downloadArray[downloadArray.length - 1]?.url || ""
-  };
+async function innertubeSearch(query) {
+  const keys = [
+    "AIzaSyAO_FJ2SlqU8Q4STEHLXKwJsRZGBJmMlE",
+    "AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w"
+  ];
+  for (const key of keys) {
+    try {
+      const res = await fetch(`https://www.youtube.com/youtubei/v1/search?key=${key}&prettyPrint=false`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "User-Agent": UA },
+        body: JSON.stringify({
+          query,
+          params: "EgIQAQ==",
+          context: { client: { clientName: "WEB", clientVersion: "2.20241126.00.00", hl: "en", gl: "US" } }
+        })
+      });
+      if (!res.ok) {
+        console.warn(`[YT] search HTTP ${res.status}`);
+        continue;
+      }
+      const data = await res.json();
+      const sections = data?.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents || [];
+      const items = [];
+      for (const section of sections) {
+        for (const c of section?.itemSectionRenderer?.contents || []) {
+          if (c?.videoRenderer?.videoId) items.push(c.videoRenderer);
+        }
+      }
+      if (items.length) return items;
+    } catch (e) {
+      console.warn("[YT] search error:", e?.message);
+    }
+  }
+  return [];
+}
+function formatMillis(ms) {
+  if (!ms) return "0:00";
+  const s = Math.round(ms / 1e3);
+  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
 }
 app.get("/api/search", async (req, res) => {
   try {
-    const q = req.query.q;
-    if (!q || q.trim().length === 0) {
-      return res.status(400).json({ error: "Query parameter 'q' is required" });
+    const q = req.query.q || "";
+    if (!q.trim()) return res.status(400).json({ error: "q required" });
+    const yt = await innertubeSearch(q.trim());
+    if (yt.length) {
+      const songs = yt.slice(0, 20).map((v) => ({
+        id: v.videoId,
+        title: v.title?.runs?.[0]?.text || "Unknown",
+        artist: v.ownerText?.runs?.[0]?.text || v.longBylineText?.runs?.[0]?.text || "Unknown",
+        album: "YouTube",
+        duration: v.lengthText?.simpleText || "0:00",
+        cover: (v.thumbnail?.thumbnails || []).slice(-1)[0]?.url || "",
+        streamUrl: `https://www.youtube.com/watch?v=${v.videoId}`
+      }));
+      console.log(`[Search] YouTube: ${songs.length} results`);
+      return res.json({ results: songs });
     }
-    const query = encodeURIComponent(q.trim());
-    for (const apiEndpoint of SAAVN_APIS) {
-      try {
-        const url = `${apiEndpoint}?query=${query}&limit=20`;
-        console.log(`[Search] Trying: ${apiEndpoint}`);
-        const response = await fetch(url, {
-          headers: {
-            "Accept": "application/json",
-            "User-Agent": "Mozilla/5.0"
-          }
-        });
-        if (!response.ok) {
-          console.warn(`[Search] ${apiEndpoint} failed: HTTP ${response.status}`);
-          continue;
+    try {
+      const r = await fetch(`https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&limit=20`);
+      if (r.ok) {
+        const data = await r.json();
+        if (data?.results?.length) {
+          console.log(`[Search] iTunes: ${data.results.length} results`);
+          return res.json({
+            results: data.results.map((t) => ({
+              id: String(t.trackId),
+              title: t.trackName || "Unknown",
+              artist: t.artistName || "Unknown",
+              album: t.collectionName || "",
+              duration: formatMillis(t.trackTimeMillis),
+              cover: (t.artworkUrl100 || "").replace("100x100", "400x400"),
+              streamUrl: t.previewUrl || ""
+            }))
+          });
         }
-        const data = await response.json();
-        let rawSongs = data?.data?.results || data?.results || data?.songs || data?.data || [];
-        if (!Array.isArray(rawSongs)) {
-          console.warn(`[Search] ${apiEndpoint} returned non-array`);
-          continue;
-        }
-        if (rawSongs.length === 0) {
-          console.warn(`[Search] ${apiEndpoint} returned empty`);
-          continue;
-        }
-        const songs = rawSongs.map(normalizeSaavnSong);
-        console.log(`[Search] \u2713 Success with ${apiEndpoint}: ${songs.length} songs`);
-        return res.json({ results: songs });
-      } catch (error) {
-        console.warn(`[Search] ${apiEndpoint} error:`, error?.message);
-        continue;
       }
+    } catch (e) {
+      console.warn("[iTunes] error:", e?.message);
     }
-    console.error("[Search] All Saavn APIs failed");
-    return res.status(503).json({
-      error: "All search services temporarily unavailable",
-      query: q
-    });
+    return res.status(503).json({ error: "All search services unavailable" });
   } catch (err) {
-    console.error("[Search] Fatal error:", err);
-    return res.status(500).json({
-      error: "Search failed",
-      details: err?.message
-    });
+    return res.status(500).json({ error: "Search failed", details: err?.message });
   }
 });
 async function fetchFromInnertube(videoId, clientName, clientVersion) {
   const url = "https://www.youtube.com/youtubei/v1/player?key=AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w&prettyPrint=false";
   const payload = {
     videoId,
-    context: {
-      client: {
-        clientName,
-        clientVersion,
-        hl: "en",
-        gl: "US",
-        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-      }
-    }
+    context: { client: { clientName, clientVersion, hl: "en", gl: "US", userAgent: UA } }
   };
   const response = await fetch(url, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-      "Accept": "application/json"
-    },
+    headers: { "Content-Type": "application/json", "User-Agent": UA, "Accept": "application/json" },
     body: JSON.stringify(payload)
   });
-  if (!response.ok) {
-    throw new Error(`Innertube failed: ${response.status}`);
-  }
+  if (!response.ok) throw new Error(`Innertube failed: ${response.status}`);
   return await response.json();
 }
 app.get("/api/download", async (req, res) => {
@@ -24147,15 +24149,14 @@ app.get("/api/download", async (req, res) => {
     const clients = [
       { name: "WEB", version: "2.20241126.00.00" },
       { name: "ANDROID", version: "19.44.38" },
-      { name: "IOS", version: "19.45.4" },
-      { name: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", version: "2.0" }
+      { name: "IOS", version: "19.45.4" }
     ];
     const errors = [];
     for (const client of clients) {
       try {
         const data = await fetchFromInnertube(videoId, client.name, client.version);
         if (data.playabilityStatus?.status !== "OK") {
-          errors.push(`${client.name}: ${data.playabilityStatus?.status || "unknown"}`);
+          errors.push(`${client.name}: ${data.playabilityStatus?.status}`);
           continue;
         }
         const streamingData = data.streamingData;
@@ -24163,40 +24164,16 @@ app.get("/api/download", async (req, res) => {
           errors.push(`${client.name}: no streamingData`);
           continue;
         }
-        const allFormats = [
-          ...streamingData.adaptiveFormats || [],
-          ...streamingData.formats || []
-        ];
-        if (allFormats.length === 0) {
-          errors.push(`${client.name}: no formats`);
-          continue;
-        }
-        const audioFormats = allFormats.filter((f) => {
-          const mime = f.mimeType || "";
-          return mime.startsWith("audio/");
-        });
+        const allFormats = [...streamingData.adaptiveFormats || [], ...streamingData.formats || []];
+        const audioFormats = allFormats.filter((f) => (f.mimeType || "").startsWith("audio/"));
         if (audioFormats.length === 0) {
-          errors.push(`${client.name}: ${allFormats.length} formats, 0 audio`);
+          errors.push(`${client.name}: 0 audio`);
           continue;
         }
         const best = audioFormats.sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0))[0];
         let audioUrl = best.url;
         if (!audioUrl && best.signatureCipher) {
-          const params = new URLSearchParams(best.signatureCipher);
-          audioUrl = params.get("url");
-          if (audioUrl) {
-            return res.json({
-              success: true,
-              downloadUrl: audioUrl,
-              title: data.videoDetails?.title || title,
-              engine: `innertube-${client.name}`,
-              bitrate: best.bitrate || 0,
-              mimeType: best.mimeType || "audio/webm",
-              note: "signature may need deciphering"
-            });
-          }
-          errors.push(`${client.name}: signature cipher, no direct url`);
-          continue;
+          audioUrl = new URLSearchParams(best.signatureCipher).get("url") || void 0;
         }
         if (audioUrl) {
           return res.json({
@@ -24209,15 +24186,12 @@ app.get("/api/download", async (req, res) => {
             mimeType: best.mimeType || "audio/webm"
           });
         }
-        errors.push(`${client.name}: audio found but no url`);
+        errors.push(`${client.name}: no url`);
       } catch (e) {
-        errors.push(`${client.name}: ${e?.message || String(e)}`);
+        errors.push(`${client.name}: ${e?.message}`);
       }
     }
-    return res.status(500).json({
-      error: "All Innertube clients failed",
-      debug: errors
-    });
+    return res.status(500).json({ error: "All Innertube clients failed", debug: errors });
   } catch (err) {
     return res.status(500).json({ error: "Failed", details: err?.message });
   }
