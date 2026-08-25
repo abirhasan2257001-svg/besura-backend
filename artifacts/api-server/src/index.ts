@@ -9,10 +9,122 @@ app.get("/api/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
 
+// Multiple Saavn API instances with fallback
+const SAAVN_APIS = [
+  'https://saavn.dev/api/search/songs',
+  'https://saavn-api.vercel.app/api/search/songs',
+  'https://jiosaavn-api-privatecvc2.vercel.app/search/songs',
+];
+
+interface SaavnSong {
+  id: string;
+  name?: string;
+  title?: string;
+  primaryArtists?: string;
+  singers?: string;
+  album?: { name: string } | string;
+  duration?: string;
+  image?: Array<{ url: string; quality: string }> | string;
+  downloadUrl?: Array<{ url: string; quality: string }>;
+  more_info?: {
+    album_url?: string;
+    duration?: string;
+  };
+}
+
+function normalizeSaavnSong(song: SaavnSong) {
+  const imageArray = Array.isArray(song.image) ? song.image : [];
+  const downloadArray = Array.isArray(song.downloadUrl) ? song.downloadUrl : [];
+  
+  return {
+    id: song.id,
+    title: song.name || song.title || 'Unknown',
+    artist: song.primaryArtists || song.singers || 'Unknown Artist',
+    album: typeof song.album === 'object' ? song.album?.name || 'Unknown' : song.album || 'Unknown',
+    duration: song.duration || song.more_info?.duration || '0:00',
+    cover: imageArray[imageArray.length - 1]?.url || (typeof song.image === 'string' ? song.image : ''),
+    streamUrl: downloadArray[downloadArray.length - 1]?.url || '',
+  };
+}
+
+app.get("/api/search", async (req, res) => {
+  try {
+    const q = req.query.q as string;
+    
+    if (!q || q.trim().length === 0) {
+      return res.status(400).json({ error: "Query parameter 'q' is required" });
+    }
+    
+    const query = encodeURIComponent(q.trim());
+    
+    // Try each Saavn API instance
+    for (const apiEndpoint of SAAVN_APIS) {
+      try {
+        const url = `${apiEndpoint}?query=${query}&limit=20`;
+        console.log(`[Search] Trying: ${apiEndpoint}`);
+        
+        const response = await fetch(url, {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Mozilla/5.0',
+          },
+        });
+        
+        if (!response.ok) {
+          console.warn(`[Search] ${apiEndpoint} failed: HTTP ${response.status}`);
+          continue;
+        }
+        
+        const data = await response.json();
+        
+        // Handle different response structures
+        let rawSongs = data?.data?.results || 
+                      data?.results || 
+                      data?.songs ||
+                      data?.data ||
+                      [];
+        
+        if (!Array.isArray(rawSongs)) {
+          console.warn(`[Search] ${apiEndpoint} returned non-array`);
+          continue;
+        }
+        
+        if (rawSongs.length === 0) {
+          console.warn(`[Search] ${apiEndpoint} returned empty`);
+          continue;
+        }
+        
+        // Normalize songs
+        const songs = rawSongs.map(normalizeSaavnSong);
+        
+        console.log(`[Search] ✓ Success with ${apiEndpoint}: ${songs.length} songs`);
+        return res.json({ results: songs });
+        
+      } catch (error: any) {
+        console.warn(`[Search] ${apiEndpoint} error:`, error?.message);
+        continue;
+      }
+    }
+    
+    console.error('[Search] All Saavn APIs failed');
+    return res.status(503).json({ 
+      error: "All search services temporarily unavailable",
+      query: q 
+    });
+    
+  } catch (err: any) {
+    console.error('[Search] Fatal error:', err);
+    return res.status(500).json({ 
+      error: "Search failed", 
+      details: err?.message 
+    });
+  }
+});
+
 // Innertube API direct call
 async function fetchFromInnertube(videoId: string, clientName: string, clientVersion: string) {
   const url = "https://www.youtube.com/youtubei/v1/player?key=AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w&prettyPrint=false";
-  
+
   const payload = {
     videoId,
     context: {
@@ -55,7 +167,6 @@ app.get("/api/download", async (req, res) => {
 
     const videoId = match[1];
 
-    // Multiple clients try করবো
     const clients = [
       { name: "WEB", version: "2.20241126.00.00" },
       { name: "ANDROID", version: "19.44.38" },
@@ -69,7 +180,6 @@ app.get("/api/download", async (req, res) => {
       try {
         const data = await fetchFromInnertube(videoId, client.name, client.version);
 
-        // Check playability
         if (data.playabilityStatus?.status !== "OK") {
           errors.push(`${client.name}: ${data.playabilityStatus?.status || "unknown"}`);
           continue;
@@ -81,7 +191,6 @@ app.get("/api/download", async (req, res) => {
           continue;
         }
 
-        // Combine formats
         const allFormats = [
           ...(streamingData.adaptiveFormats || []),
           ...(streamingData.formats || []),
@@ -92,7 +201,6 @@ app.get("/api/download", async (req, res) => {
           continue;
         }
 
-        // Filter audio formats
         const audioFormats = allFormats.filter((f: any) => {
           const mime = f.mimeType || "";
           return mime.startsWith("audio/");
@@ -103,15 +211,12 @@ app.get("/api/download", async (req, res) => {
           continue;
         }
 
-        // Get best quality
         const best = audioFormats.sort((a: any, b: any) => (b.bitrate || 0) - (a.bitrate || 0))[0];
 
-        // Handle signature cipher
         let audioUrl = best.url;
         if (!audioUrl && best.signatureCipher) {
           const params = new URLSearchParams(best.signatureCipher);
           audioUrl = params.get("url");
-          // Note: signature deciphering complex, skip for now
           if (audioUrl) {
             return res.json({
               success: true,
@@ -145,7 +250,7 @@ app.get("/api/download", async (req, res) => {
       }
     }
 
-    return res.status(500).json({ 
+    return res.status(500).json({
       error: "All Innertube clients failed",
       debug: errors
     });
