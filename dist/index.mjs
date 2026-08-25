@@ -24038,6 +24038,76 @@ app.use(import_express.default.json());
 app.get("/api/healthz", (_req, res) => {
   res.json({ status: "ok" });
 });
+var SAAVN_APIS = [
+  "https://saavn.dev/api/search/songs",
+  "https://saavn-api.vercel.app/api/search/songs",
+  "https://jiosaavn-api-privatecvc2.vercel.app/search/songs"
+];
+function normalizeSaavnSong(song) {
+  const imageArray = Array.isArray(song.image) ? song.image : [];
+  const downloadArray = Array.isArray(song.downloadUrl) ? song.downloadUrl : [];
+  return {
+    id: song.id,
+    title: song.name || song.title || "Unknown",
+    artist: song.primaryArtists || song.singers || "Unknown Artist",
+    album: typeof song.album === "object" ? song.album?.name || "Unknown" : song.album || "Unknown",
+    duration: song.duration || song.more_info?.duration || "0:00",
+    cover: imageArray[imageArray.length - 1]?.url || (typeof song.image === "string" ? song.image : ""),
+    streamUrl: downloadArray[downloadArray.length - 1]?.url || ""
+  };
+}
+app.get("/api/search", async (req, res) => {
+  try {
+    const q = req.query.q;
+    if (!q || q.trim().length === 0) {
+      return res.status(400).json({ error: "Query parameter 'q' is required" });
+    }
+    const query = encodeURIComponent(q.trim());
+    for (const apiEndpoint of SAAVN_APIS) {
+      try {
+        const url = `${apiEndpoint}?query=${query}&limit=20`;
+        console.log(`[Search] Trying: ${apiEndpoint}`);
+        const response = await fetch(url, {
+          headers: {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0"
+          }
+        });
+        if (!response.ok) {
+          console.warn(`[Search] ${apiEndpoint} failed: HTTP ${response.status}`);
+          continue;
+        }
+        const data = await response.json();
+        let rawSongs = data?.data?.results || data?.results || data?.songs || data?.data || [];
+        if (!Array.isArray(rawSongs)) {
+          console.warn(`[Search] ${apiEndpoint} returned non-array`);
+          continue;
+        }
+        if (rawSongs.length === 0) {
+          console.warn(`[Search] ${apiEndpoint} returned empty`);
+          continue;
+        }
+        const songs = rawSongs.map(normalizeSaavnSong);
+        console.log(`[Search] \u2713 Success with ${apiEndpoint}: ${songs.length} songs`);
+        return res.json({ results: songs });
+      } catch (error) {
+        console.warn(`[Search] ${apiEndpoint} error:`, error?.message);
+        continue;
+      }
+    }
+    console.error("[Search] All Saavn APIs failed");
+    return res.status(503).json({
+      error: "All search services temporarily unavailable",
+      query: q
+    });
+  } catch (err) {
+    console.error("[Search] Fatal error:", err);
+    return res.status(500).json({
+      error: "Search failed",
+      details: err?.message
+    });
+  }
+});
 async function fetchFromInnertube(videoId, clientName, clientVersion) {
   const url = "https://www.youtube.com/youtubei/v1/player?key=AIzaSyA8eiZmM1FaDVjRy-df2KTyQ_vz_yYM39w&prettyPrint=false";
   const payload = {
